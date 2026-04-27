@@ -408,26 +408,18 @@ class GMRAFusion(nn.Module):
         feat_scene: [BT, C, H, W]
         feat_prior: [BT, C, H, W]
         """
-        BT, C, H, W = feat_scene.shape
-        scale = C ** -0.5
-
         # prior guide (MAP-Net L146-149)
         feat_j = self.guide_conv(torch.cat([feat_prior, feat_scene], dim=1))
-        q_j = feat_j   # query
 
-        # GMRA attention (MAP-Net L204-218, nr=1)
-        # q_j: [BT, C, H, W] → [BT*H*W, 1, C]
-        q  = feat_j.permute(0, 2, 3, 1).reshape(BT * H * W, 1, C)
-        k_j = feat_j.permute(0, 2, 3, 1).reshape(BT * H * W, 1, C)
-        k_p = feat_prior.permute(0, 2, 3, 1).reshape(BT * H * W, 1, C)
-
-        attn_j = q @ k_j.transpose(-2, -1) * scale   # [BT*HW, 1, 1]
-        attn_p = q @ k_p.transpose(-2, -1) * scale   # [BT*HW, 1, 1]
-        attn   = F.softmax(attn_j + self.aggre_beta * attn_p, dim=-1)
-
-        v    = k_j   # value = scene key
-        out  = attn @ v   # [BT*HW, 1, C]
-        out  = out.squeeze(1).reshape(BT, H, W, C).permute(0, 3, 1, 2)  # [BT,C,H,W]
+        # GMRA attention with nr=1: when sequence length=1, softmax([scalar])=1,
+        # so attn@v = v = feat_j. Compute attention weight as channel-wise dot product
+        # instead of [BT*H*W, 1, 1] matmul to avoid the 1.25GB allocation.
+        scale = feat_j.shape[1] ** -0.5
+        attn_j = (feat_j * feat_j).sum(dim=1, keepdim=True) * scale        # [BT,1,H,W]
+        attn_p = (feat_j * feat_prior).sum(dim=1, keepdim=True) * scale     # [BT,1,H,W]
+        # sigmoid replaces the degenerate softmax(scalar) which was always 1
+        gate = torch.sigmoid(attn_j + self.aggre_beta * attn_p)             # [BT,1,H,W]
+        out  = feat_j * gate                                                 # [BT,C,H,W]
 
         return self.aggre_conv(torch.cat([out, feat_j], dim=1))
 
@@ -472,11 +464,11 @@ class Decoder(nn.Module):
     def forward(self, feat, skip=None):
         """
         feat : [BT, hidden, H/2, W/2]
-        skip : [BT, hidden, H/2, W/2]  (encoder skip, optional)
+        skip : [BT, hidden, H/2, W/2]  (encoder skip, fused before upsample)
         """
-        x = self.up(feat)                              # [BT, hidden, H, W]
         if skip is not None:
-            x = self.skip_fusion([x, skip])            # SKFusion (DehazeFormer)
+            feat = self.skip_fusion([feat, skip])      # fuse at H/2, same spatial size
+        x = self.up(feat)                              # [BT, hidden, H, W]
         x = self.body(x)
         x = self.lrelu(self.conv_hr(x))
         return self.conv_last(x)                       # residual delta
@@ -506,7 +498,7 @@ class WavePriorNet(nn.Module):
         hidden: int = 128,
         stack_num: int = 6,
         num_trans_bins: int = 32,
-        patchsize=((54, 30), (36, 20), (18, 10), (9, 5)),
+        patchsize=((32, 32), (16, 16), (8, 8), (4, 4)),
     ):
         super().__init__()
         self.num_frames = num_frames

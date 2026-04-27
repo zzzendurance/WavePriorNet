@@ -225,6 +225,9 @@ def train_one_epoch(model, loader, optimizer, scaler, perc_loss_fn, device, args
     accum       = {k: 0.0 for k in ('main', 'phy_j', 'phy_i', 'perc', 'chamfer')}
     t0          = time.time()
 
+    accum_steps = args.accum_steps
+    optimizer.zero_grad()
+
     for step, (hazy, color, gt) in enumerate(loader):
         hazy  = hazy.to(device, non_blocking=True)
         color = color.to(device, non_blocking=True)
@@ -233,22 +236,29 @@ def train_one_epoch(model, loader, optimizer, scaler, perc_loss_fn, device, args
         B, T, C, H, W = gt.shape
         gt_flat = gt.view(B * T, C, H, W)
 
-        optimizer.zero_grad()
-
         with autocast(enabled=args.amp):
             output = model(hazy, color)
             loss, loss_dict = compute_loss(output, gt_flat, perc_loss_fn, args, device)
 
+        # normalize loss so gradients are averaged across accumulation steps
+        loss_scaled = loss / accum_steps
+
         if args.amp:
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
-            scaler.update()
+            scaler.scale(loss_scaled).backward()
         else:
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            loss_scaled.backward()
+
+        is_update_step = (step + 1) % accum_steps == 0 or (step + 1) == len(loader)
+        if is_update_step:
+            if args.amp:
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+            optimizer.zero_grad()
 
         total_loss += loss.item()
         for k in accum:
@@ -311,6 +321,8 @@ def parse_args():
     p.add_argument('--lambda_perc',    type=float, default=0.1)
     p.add_argument('--lambda_chamfer', type=float, default=0.05)
     p.add_argument('--amp',            action='store_true', default=False)
+    p.add_argument('--accum_steps',    type=int,   default=1,
+                   help='gradient accumulation steps (effective_batch = batch_size * accum_steps)')
     p.add_argument('--num_workers',    type=int,   default=8)
     p.add_argument('--save_dir',       type=str,   default='checkpoints')
     p.add_argument('--log_every',      type=int,   default=20)
@@ -407,7 +419,7 @@ def main():
     # ---- 训练配置打印 ----
     print(f"\n{'='*55}")
     print(f"  WavePriorNet  –  A6000 48GB  |  {run_name}")
-    print(f"  batch={args.batch_size}  T={args.num_frames}  crop={args.crop_size}  AMP={args.amp}")
+    print(f"  batch={args.batch_size}  accum={args.accum_steps}  effective_batch={args.batch_size * args.accum_steps}  T={args.num_frames}  crop={args.crop_size}  AMP={args.amp}")
     print(f"  epochs={args.epochs}  warmup={args.warmup_epochs}  steps/ep={len(train_loader)}")
     print(f"  lr {args.lr}→{args.lr_min}  wd={args.weight_decay}")
     print(f"  params={n_params:.1f}M")
