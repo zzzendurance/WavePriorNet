@@ -228,7 +228,7 @@ def train_one_epoch(model, loader, optimizer, scaler, perc_loss_fn, device, args
     accum_steps = args.accum_steps
     optimizer.zero_grad()
 
-    for step, (hazy, color, gt) in enumerate(loader):
+    for step, (hazy, color, gt, _, _) in enumerate(loader):
         hazy  = hazy.to(device, non_blocking=True)
         color = color.to(device, non_blocking=True)
         gt    = gt.to(device, non_blocking=True)
@@ -290,7 +290,7 @@ def train_one_epoch(model, loader, optimizer, scaler, perc_loss_fn, device, args
 def validate(model, loader, device):
     model.eval()
     total_psnr, count = 0.0, 0
-    for hazy, color, gt in loader:
+    for hazy, color, gt, _, _ in loader:
         hazy  = hazy.to(device)
         color = color.to(device)
         gt    = gt.to(device)

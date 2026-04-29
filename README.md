@@ -294,12 +294,13 @@ python color_shift.py --split Test  --data_dir .
 pip install torch torchvision Pillow tensorboard numpy
 ```
 
-### 推荐训练配置（A6000 48GB，显存安全）
+### 训练
+
+推荐配置（A6000 48GB，显存安全）：
 
 ```bash
-cd WavePriorNet
 python train.py \
-  --data_root /path/to/REVIDE_indoor \
+  --data_root /home/user/zhaojiaqi/datasets/videoDehazeDatasets/REVIDE_indoor \
   --batch_size 2 \
   --crop_size 384 \
   --accum_steps 4 \
@@ -307,13 +308,13 @@ python train.py \
   --warmup_epochs 10
 ```
 
-等效 batch = 2 × 4 = **8**，显存约 8-10 GB，训练行为与 batch=8 完全一致。
+等效 batch = 2 × 4 = **8**，显存约 8-10 GB。
 
-快速验证（先跑 20 轮确认收敛，再决定是否跑满）：
+快速验证（20 epoch 确认收敛）：
 
 ```bash
 python train.py \
-  --data_root /path/to/REVIDE_indoor \
+  --data_root /home/user/zhaojiaqi/datasets/videoDehazeDatasets/REVIDE_indoor \
   --batch_size 2 --crop_size 384 --accum_steps 4 \
   --epochs 20 --val_every 2
 ```
@@ -322,7 +323,7 @@ python train.py \
 
 ```bash
 python train.py \
-  --data_root /path/to/REVIDE_indoor \
+  --data_root /home/user/zhaojiaqi/datasets/videoDehazeDatasets/REVIDE_indoor \
   --batch_size 2 --crop_size 384 --accum_steps 4 \
   --resume checkpoints/run_xxx/latest.pth
 ```
@@ -333,15 +334,72 @@ TensorBoard 监控：
 tensorboard --logdir checkpoints/
 ```
 
-### 测试（计算 PSNR / SSIM，保存预测图像）
+---
+
+### 测试（test.py）
+
+在整个 Test split 上评估 PSNR/SSIM，并按序列保存四路图像（pred / gt / hazy / color）：
 
 ```bash
 python test.py \
-  --data_root /path/to/REVIDE_indoor \
-  --ckpt checkpoints/run_xxx/best.pth \
+  --ckpt  checkpoints/run_20260428_005635/best.pth \
+  --data_root /home/user/zhaojiaqi/datasets/videoDehazeDatasets/REVIDE_indoor \
+  --split Test \
+  --num_frames 5 \
+  --batch_size 1 \
+  --crop_size 384 \
   --save_images \
-  --save_dir results/
+  --save_dir results/run_20260428_005635_test
 ```
+
+> **注意**：`--crop_size` 必须能被 **128** 整除（Encoder stride=2 × DWT stride=2 × patchsize=32）。
+> 不加 `--crop_size` 时原图 2708×1800 → 特征图 450×677，patchsize=32 无法整除，`view` 直接报错。
+> 推荐值：384（训练时用的）或 512。
+
+输出目录结构（按序列对应原始数据集）：
+
+```
+results/run_20260428_005635_test/
+├── pred/
+│   ├── C005/  00000.png  00001.png  ...   ← 去雾预测
+│   ├── E005/  ...
+│   └── ...
+├── gt/    C005/  00000.png  ...           ← 干净 GT
+├── hazy/  C005/  00000.png  ...           ← 原始有雾输入
+├── color/ C005/  00000.png  ...           ← gt_color_shift 输入
+├── eval_results.json                      ← 总体 PSNR / SSIM
+└── per_frame.csv                          ← 逐帧 seq / frame / psnr / ssim
+```
+
+**Test split 采样规则**：每个序列按 `num_frames=5` 做非重叠切片，尾部不足 5 帧的丢弃。
+6 个序列共 284 帧，切出 54 个 clip × 5 帧 = **270 帧**。
+
+| 序列 | 总帧数 | clip 数 |
+|------|--------|---------|
+| C005 | 43 | 8 |
+| E005 | 58 | 11 |
+| E006 | 36 | 7 |
+| J004 | 57 | 11 |
+| L006 | 54 | 10 |
+| W002 | 36 | 7 |
+
+---
+
+### 单张推理（infer_single.py）
+
+只有一张有雾图和一张 gt_color_shift 图时使用：
+
+```bash
+python infer_single.py \
+  --ckpt  checkpoints/run_20260428_005635/best.pth \
+  --hazy  /home/user/zhaojiaqi/datasets/videoDehazeDatasets/REVIDE_indoor/Test/hazy/C005/00000.JPG \
+  --color /home/user/zhaojiaqi/datasets/videoDehazeDatasets/REVIDE_indoor/Test/gt_color_shift/C005/00000.JPG \
+  --out   pred_C005_00000.png \
+  --crop_size 384
+```
+
+模型需要 T=5 帧输入，脚本将这一张图复制 5 份填充，取第 0 帧输出作为预测结果。
+`--crop_size` 同样必须能被 128 整除，原图过大时必须指定。
 
 ---
 
@@ -371,11 +429,12 @@ python test.py \
 ```
 WavePriorNet/
 ├── core/
-│   ├── dataset.py          # REVIDE_indoor 三路数据加载（hazy/gt/gt_color_shift）
+│   ├── dataset.py          # REVIDE_indoor 三路数据加载（hazy/gt/gt_color_shift），返回 seq_name/frame_names
 │   └── dwt.py              # 纯 PyTorch Haar DWT/IDWT（无外部依赖）
 ├── model_wavepriornet.py   # 完整网络定义（585 行）
 ├── train.py                # 训练脚本（含物理先验 loss + warmup + 梯度累积）
-├── test.py                 # 测试/评估脚本（PSNR/SSIM）
+├── test.py                 # 测试/评估脚本（PSNR/SSIM，按序列保存四路图像）
+├── infer_single.py         # 单张推理脚本（单张 hazy + color_shift → pred）
 └── requirements.txt
 ```
 

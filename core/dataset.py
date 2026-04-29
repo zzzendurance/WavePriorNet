@@ -154,4 +154,8 @@ class REVIDEDataset(Dataset):
         color = torch.stack([to_tensor(f) for f in color_imgs])  # [T,3,H,W]
         gt = torch.stack([to_tensor(f) for f in gt_imgs])        # [T,3,H,W]
 
-        return hazy, color, gt
+        # 序列名和每帧的文件名（不含扩展名），供保存时还原目录结构
+        seq_name = hazy_paths[start].parent.name
+        frame_names = [hazy_paths[start + i].stem for i in range(self.num_frames)]
+
+        return hazy, color, gt, seq_name, frame_names

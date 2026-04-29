@@ -80,14 +80,9 @@ def evaluate(model, loader, device, save_dir=None):
     model.eval()
     all_psnr, all_ssim = [], []
     per_frame_rows = []
-    frame_idx = 0
     infer_times = []
 
-    if save_dir:
-        for sub in ('pred', 'gt', 'hazy'):
-            (Path(save_dir) / sub).mkdir(parents=True, exist_ok=True)
-
-    for batch_idx, (hazy, color, gt) in enumerate(loader):
+    for batch_idx, (hazy, color, gt, seq_names, frame_names_batch) in enumerate(loader):
         hazy  = hazy.to(device)
         color = color.to(device)
         gt    = gt.to(device)
@@ -98,26 +93,37 @@ def evaluate(model, loader, device, save_dir=None):
 
         pred = output['out'].clamp(0, 1)
         B, T, C, H, W = gt.shape
-        gt_flat   = gt.view(B * T, C, H, W)
-        hazy_flat = hazy.view(B * T, C, H, W)
+        gt_flat    = gt.view(B * T, C, H, W)
+        hazy_flat  = hazy.view(B * T, C, H, W)
+        color_flat = color.view(B * T, C, H, W)
 
-        for i in range(pred.shape[0]):
+        # frame_names_batch: list of T lists, each length B (DataLoader collate 转置了)
+        # 转成 B*T 个 (seq, fname) 对
+        flat_meta = []
+        for b in range(B):
+            seq = seq_names[b]
+            for t in range(T):
+                flat_meta.append((seq, frame_names_batch[t][b]))
+
+        for i, (seq, fname) in enumerate(flat_meta):
             p = psnr(pred[i:i+1], gt_flat[i:i+1])
             s = ssim_single(pred[i], gt_flat[i])
             all_psnr.append(p)
             all_ssim.append(s)
             per_frame_rows.append({
-                'frame_idx': frame_idx,
-                'psnr':      round(p, 4),
-                'ssim':      round(s, 4),
+                'seq':   seq,
+                'frame': fname,
+                'psnr':  round(p, 4),
+                'ssim':  round(s, 4),
             })
 
             if save_dir:
-                save_image(pred[i],     str(Path(save_dir) / 'pred'  / f'{frame_idx:05d}.png'))
-                save_image(gt_flat[i],  str(Path(save_dir) / 'gt'    / f'{frame_idx:05d}.png'))
-                save_image(hazy_flat[i],str(Path(save_dir) / 'hazy'  / f'{frame_idx:05d}.png'))
-
-            frame_idx += 1
+                for sub in ('pred', 'gt', 'hazy', 'color'):
+                    (Path(save_dir) / sub / seq).mkdir(parents=True, exist_ok=True)
+                save_image(pred[i],       str(Path(save_dir) / 'pred'  / seq / f'{fname}.png'))
+                save_image(gt_flat[i],    str(Path(save_dir) / 'gt'    / seq / f'{fname}.png'))
+                save_image(hazy_flat[i],  str(Path(save_dir) / 'hazy'  / seq / f'{fname}.png'))
+                save_image(color_flat[i], str(Path(save_dir) / 'color' / seq / f'{fname}.png'))
 
         if (batch_idx + 1) % 10 == 0:
             print(f"  [{batch_idx+1}/{len(loader)}]  "
@@ -220,7 +226,7 @@ def main():
         stack_num=args.stack_num,
     ).to(device)
 
-    ckpt = torch.load(args.ckpt, map_location=device)
+    ckpt = torch.load(args.ckpt, map_location=device, weights_only=False)
     model.load_state_dict(ckpt['model'])
     ckpt_epoch    = ckpt.get('epoch', '?')
     ckpt_best_psnr = ckpt.get('best_psnr', 0.0)
@@ -280,7 +286,7 @@ def main():
         # ---- 保存 per_frame.csv ----
         csv_path = save_dir / 'per_frame.csv'
         with open(csv_path, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=['frame_idx', 'psnr', 'ssim'])
+            writer = csv.DictWriter(f, fieldnames=['seq', 'frame', 'psnr', 'ssim'])
             writer.writeheader()
             writer.writerows(per_frame_rows)
         print(f"  per_frame.csv      → {csv_path}")
